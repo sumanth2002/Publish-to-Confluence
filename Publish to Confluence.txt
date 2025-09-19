@@ -1,0 +1,112 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use JSON qw(encode_json decode_json);
+use utf8;
+use feature qw/say/;
+use open qw(:std :utf8);
+
+# --- Configuration ---
+my $confUser    = "userid";
+my $confPwd     = "${p:password}";
+my $baseUrl     = "https://confluence.com";
+my $pageId      = "123456";
+my $pageName    = "Page Name";
+
+my $invalidFile = "<filepath>";
+my $missingFile = "<filepath>";
+
+# --- Fetch current page version ---
+my $history_api = "$baseUrl/rest/api/content/$pageId/history";
+my $pageData = `curl -s -k -u $confUser:$confPwd -H "Accept: application/json" "$history_api"`;
+$pageData =~ s/^\s+|\s+$//g;
+die "ERROR: empty response from Confluence history API\n" unless length $pageData;
+
+my $jsonPageData;
+eval   { $jsonPageData = decode_json($pageData) };
+if ($@) {
+    die "ERROR: invalid JSON from Confluence API:\n$@\nRaw:\n$pageData\n";
+}
+
+my $curVersion  = $jsonPageData->{lastUpdated}{number}
+                // die "ERROR: missing lastUpdated.number in JSON\n";
+my $nextVersion = $curVersion + 1;
+
+# --- Build HTML body ---
+my $html = <<"EOF";
+<p>description</p>
+<p>description</p>
+<p>description</p>
+EOF
+
+
+if (-e $invalidFile) {
+    open my $invFH, '<:encoding(UTF-8)', $invalidFile or die "Cannot open $invalidFile: $!";
+    $html .= "<table border='1' cellpadding='4' cellspacing='0'>\n";
+    $html .= "<tr><th>Sl.No</th><th>Heading</th></tr>\n";
+    my $i = 1;
+    while (<$invFH>) {
+        chomp;
+        next if /^\s*$/;
+        s/&/&amp;/g;  s/</&lt;/g;  s/>/&gt;/g;  s/"/&quot;/g;
+        $html .= "<tr><td>$i</td><td>$_</td></tr>\n";
+
+        $i++;
+    }
+    $html .= "</table>\n";
+    close $invFH;
+} else {
+    $html .= qq{<p style="color:red">Missing file: $invalidFile</p>\n};
+}
+
+if (-e $missingFile) {
+    open my $missFH, '<:encoding(UTF-8)', $missingFile or die "Cannot open $missingFile: $!";
+    $html .= "<table border='1' cellpadding='4' cellspacing='0'>\n";
+    $html .= "<tr><th>Sl.No</th><th>Heading</th></tr>\n";
+    my $j = 1;
+    while (<$missFH>) {
+        chomp;
+        next if /^\s*$/;
+        s/&/&amp;/g;  s/</&lt;/g;  s/>/&gt;/g;  s/"/&quot;/g;
+        $html .= "<tr><td>$j</td><td>$_</td></tr>\n";
+
+        $j++;
+    }
+    $html .= "</table>\n";
+    close $missFH;
+} else {
+    $html .= qq{<p style="color:red">Missing file: $missingFile</p>\n};
+}
+
+# --- Create JSON payload ---
+my $payload = {
+    version => { number => $nextVersion },
+    title   => $pageName,
+    type    => "page",
+    body    => {
+        storage => {
+            value          => $html,
+            representation => "storage",
+        }
+    }
+};
+
+my $json_payload = encode_json($payload);
+
+# --- Push to Confluence ---
+my $temp = "temp_payload.json";
+open my $tmp, '>:encoding(UTF-8)', $temp or die "Cannot write $temp: $!";
+print $tmp $json_payload;
+close $tmp;
+
+my $update_api = "$baseUrl/rest/api/content/$pageId";
+my $curl = qq{curl -s -k -u $confUser:$confPwd -X PUT -H "Content-Type: application/json" --data \@$temp "$update_api"};
+my $result = `$curl`;
+
+unlink $temp;
+
+if ($result =~ /error/i) {
+    die "ERROR updating Confluence:\n$result\n";
+} else {
+    say "updated Confluence to version $nextVersion";
+}
